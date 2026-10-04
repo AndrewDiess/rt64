@@ -81,7 +81,19 @@ namespace RT64 {
         // Estimate the origin is off by one or two rows.
         if (siz >= G_IM_SIZ_16b) {
             const bool interlacedStep = status.serrate && (vCurrentLine & 0x1);
-            const uint32_t rowBytes = width * (1U << (siz - 1));
+            // Interlaced modes without deflickering use a VI stride of twice the framebuffer width
+            // (fbSize() detects this). The origin offset is then in framebuffer rows, not VI rows:
+            // Star Wars: Rogue Squadron's 512x480 menus use VI width 1024 with origin = fb + one
+            // 512-pixel row, which the VI-width row size missed by a row.
+            uint32_t rowWidth = width;
+            if (status.serrate) {
+                const hlslpp::uint2 size = fbSize();
+                if ((size.x > 0) && (size.x < width)) {
+                    rowWidth = size.x;
+                }
+            }
+
+            const uint32_t rowBytes = rowWidth * (1U << (siz - 1));
             const uint32_t rowCount = interlacedStep ? 2 : 1;
             const uint32_t rowOffset = rowBytes * rowCount;
             if (origin >= rowOffset) {
