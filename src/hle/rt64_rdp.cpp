@@ -25,6 +25,10 @@
 //#   define LOG_LOAD_METHODS
 #endif
 
+// SWRS bring-up debug aid: log RDP state commands while set (by the game glue).
+int swrs_rdp_log = 0;
+#define SWRS_RDP_LOG(...) do { if (swrs_rdp_log) { fprintf(stderr, __VA_ARGS__); } } while (0)
+
 namespace RT64 {
     // RDP
     static uint8_t getCommandLength(uint32_t commandId) {
@@ -248,6 +252,7 @@ namespace RT64 {
     }
 
     void RDP::setColorImage(uint8_t fmt, uint8_t siz, uint16_t width, uint32_t address) {
+        SWRS_RDP_LOG("[rdp] SetColorImage fmt %u siz %u width %u addr 0x%08X\n", fmt, siz, width, address);
         // Make sure the new color image is actually different. Some games will set the color image
         // multiple times despite setting the exact same parameters.
         const uint32_t newAddress = maskAddress(address);
@@ -269,6 +274,7 @@ namespace RT64 {
     }
 
     void RDP::setDepthImage(uint32_t address) {
+        SWRS_RDP_LOG("[rdp] SetDepthImage addr 0x%08X\n", address);
         const uint32_t newAddress = maskAddress(address);
         if (depthImage.address != newAddress) {
             depthImage.address = newAddress;
@@ -281,6 +287,7 @@ namespace RT64 {
     }
 
     void RDP::setTextureImage(uint8_t fmt, uint8_t siz, uint16_t width, uint32_t address) {
+        SWRS_RDP_LOG("[rdp] SetTextureImage fmt %u siz %u width %u addr 0x%08X\n", fmt, siz, width, address);
         texture.fmt = fmt;
         texture.siz = siz;
         texture.width = width;
@@ -587,6 +594,7 @@ namespace RT64 {
     }
 
     void RDP::loadTile(uint8_t tile, uint16_t uls, uint16_t ult, uint16_t lrs, uint16_t lrt) {
+        SWRS_RDP_LOG("[rdp] LoadTile %u (%u,%u)-(%u,%u)\n", tile, uls, ult, lrs, lrt);
 #ifdef LOG_LOAD_METHODS
         RT64_LOG_PRINTF("RDP::loadTile(tile %u, uls %u, ult %u, lrs %u, lrt %u)", tile, uls, ult, lrs, lrt);
 #endif
@@ -716,6 +724,7 @@ namespace RT64 {
     }
 
     void RDP::loadBlock(uint8_t tile, uint16_t uls, uint16_t ult, uint16_t lrs, uint16_t dxt) {
+        SWRS_RDP_LOG("[rdp] LoadBlock %u uls %u ult %u lrs %u dxt %u\n", tile, uls, ult, lrs, dxt);
 #ifdef LOG_LOAD_METHODS
         RT64_LOG_PRINTF("RDP::loadBlock(tile %u, uls %u, ult %u, lrs %u, dxt %u)", tile, uls, ult, lrs, dxt);
 #endif
@@ -909,6 +918,7 @@ namespace RT64 {
     }
 
     void RDP::setFogColor(uint32_t color) {
+        SWRS_RDP_LOG("[rdp] SetFogColor 0x%08X\n", color);
         hlslpp::float4 &fogColor = fogColorStack[fogColorStackSize - 1];
         fogColor.x = ((color >> 24) & 0xFF) / 255.0f;
         fogColor.y = ((color >> 16) & 0xFF) / 255.0f;
@@ -932,6 +942,7 @@ namespace RT64 {
     }
 
     void RDP::setFillColor(uint32_t color) {
+        SWRS_RDP_LOG("[rdp] SetFillColor 0x%08X\n", color);
         fillColorStack[fillColorStackSize - 1] = color;
         state->updateDrawStatusAttribute(DrawAttribute::FillColor);
     }
@@ -951,6 +962,7 @@ namespace RT64 {
     }
 
     void RDP::setOtherMode(uint32_t high, uint32_t low) {
+        SWRS_RDP_LOG("[rdp] SetOtherMode H 0x%08X (cycle %u) L 0x%08X\n", high, (high >> 20) & 3, low);
         if (otherMode.H != high || otherMode.L != low) {
             otherMode.H = high;
             otherMode.L = low;
@@ -972,6 +984,7 @@ namespace RT64 {
     }
     
     void RDP::setScissor(uint8_t mode, int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, const ExtendedAlignment &extAlignment) {
+        SWRS_RDP_LOG("[rdp] SetScissor mode %u (%d,%d)-(%d,%d) [10.2]\n", mode, ulx, uly, lrx, lry);
         FixedRect &scissorRect = scissorRectStack[scissorStackSize - 1];
         scissorRect.ulx = std::clamp(movedFromOrigin(ulx + extAlignment.leftOffset, extAlignment.leftOrigin), extAlignment.leftBound, extAlignment.rightBound);
         scissorRect.uly = std::clamp(uly + extAlignment.topOffset, extAlignment.topBound, extAlignment.bottomBound);
@@ -1031,6 +1044,7 @@ namespace RT64 {
     }
 
     void RDP::fillRect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, const ExtendedAlignment &extAlignment) {
+        SWRS_RDP_LOG("[rdp] FillRect (%d,%d)-(%d,%d) [10.2 fixed] color image 0x%08X cycle %u fill 0x%08X\n", ulx, uly, lrx, lry, colorImage.address, (otherMode.H >> 20) & 3, fillColorStack[fillColorStackSize - 1]);
 #   ifdef LOG_FILLRECT_METHODS
         RT64_LOG_PRINTF("RDP::fillRect(ulx %d, uly %d, lrx %d, lry %d)", ulx, uly, lrx, lry);
 #   endif
@@ -1083,6 +1097,7 @@ namespace RT64 {
         extended.global.rect = ExtendedAlignment();
         extended.global.scissor = ExtendedAlignment();
         extended.global.rectAspect = G_EX_ASPECT_AUTO;
+        extended.global.adjustFullWidthRects = false;
     }
     
     void RDP::drawTris(uint32_t triCount, const float *pos, const float *tc, const float *col, uint8_t tile, uint8_t levels) {
@@ -1235,6 +1250,7 @@ namespace RT64 {
         drawCall.rectLeftOrigin = extAlignment.leftOrigin;
         drawCall.rectRightOrigin = extAlignment.rightOrigin;
         drawCall.rectAspect = extended.global.rectAspect;
+        drawCall.adjustFullWidthRects = extended.global.adjustFullWidthRects;
 
         if (flushedState) {
             state->loadDrawState();

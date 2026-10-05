@@ -120,7 +120,7 @@ namespace RT64 {
         framebufferRenderer->updateMultisampling();
     }
 
-    void WorkloadQueue::threadConfigurationUpdate(hlslpp::uint2 viFbSize, WorkloadConfiguration &workloadConfig) {
+    void WorkloadQueue::threadConfigurationUpdate(hlslpp::uint2 viFbSize, float viDisplayAspect, WorkloadConfiguration &workloadConfig) {
         const std::scoped_lock lock(ext.sharedResources->configurationMutex);
         const bool sizeChanged = ext.sharedResources->swapChainSizeChanged;
         ext.sharedResources->swapChainSizeChanged = false;
@@ -132,6 +132,15 @@ namespace RT64 {
 
         // Compute the aspect ratio to be used for the frame.
         workloadConfig.aspectRatioSource = (viFbSize[1] > 0) ? float(viFbSize[0]) / float(viFbSize[1]) : (4.0f / 3.0f);
+        workloadConfig.aspectRatioPixelSource = workloadConfig.aspectRatioSource;
+
+        // With black borders removed, the VI renderer shapes the picture from the VI's active area
+        // (VIRenderer::getViewportAndScissor), not from the framebuffer's pixel count. Use the same
+        // shape here, or Expand widens by the wrong factor when the VI scales the axes differently
+        // (Star Wars: Rogue Squadron's 400x448 intro framebuffer is shown at about 4:3).
+        if (ext.sharedResources->enhancementConfig.presentation.removeBlackBorders && (viDisplayAspect > 0.0f)) {
+            workloadConfig.aspectRatioSource = viDisplayAspect;
+        }
 
         const auto ratioMode = ext.sharedResources->userConfig.aspectRatio;
         switch (ratioMode) {
@@ -628,6 +637,7 @@ namespace RT64 {
                     drawParams.rasterShaderCache = ext.rasterShaderCache;
                     drawParams.resolutionScale = fixedResScale;
                     drawParams.aspectRatioSource = workloadConfig.aspectRatioSource;
+                    drawParams.aspectRatioPixelSource = workloadConfig.aspectRatioPixelSource;
                     drawParams.aspectRatioTarget = workloadConfig.aspectRatioTarget;
                     drawParams.extAspectPercentage = workloadConfig.extAspectPercentage;
                     drawParams.horizontalMisalignment = (colorTarget != nullptr) ? float(colorTarget->misalignX) : float(depthTarget->misalignX);
@@ -912,7 +922,7 @@ namespace RT64 {
 
                 ElapsedTimer workloadTimer;
                 workloadProfiler.start();
-                threadConfigurationUpdate(workload.viFbSize, workloadConfig);
+                threadConfigurationUpdate(workload.viFbSize, workload.viDisplayAspect, workloadConfig);
 
                 // FIXME: This is a very hacky way to find out if we need to advance the frame if the workload was paused for the first time.
                 if (!workload.paused || (!gameFrames[curFrameIndex].workloads.empty() && (gameFrames[curFrameIndex].workloads[0] != (uint32_t)processCursor))) {

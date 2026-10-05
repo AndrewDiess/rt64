@@ -93,6 +93,9 @@ namespace RT64 {
                 ExtendedAlignment rect;
                 ExtendedAlignment scissor;
                 uint8_t rectAspect;
+                // Keep textured rects that cover the scissor width at 4:3 (centered) in widescreen instead of
+                // stretching them. Set by GBIs whose full-width rects are 2D art (Factor 5's F5Rogue).
+                bool adjustFullWidthRects;
             } global;
 
             uint16_t scissorLeftOriginStack[RDP_EXTENDED_STACK_SIZE];

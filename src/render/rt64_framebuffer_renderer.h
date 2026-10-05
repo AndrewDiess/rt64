@@ -136,6 +136,7 @@ namespace RT64 {
             RasterShaderCache *rasterShaderCache;
             hlslpp::float2 resolutionScale;
             float aspectRatioSource;
+            float aspectRatioPixelSource;
             float aspectRatioTarget;
             float extAspectPercentage;
             float horizontalMisalignment;

@@ -1495,6 +1495,11 @@ namespace RT64 {
             context.blockEnd = nullptr;
             context.blockFetched = false;
             context.viewportSynced = false;
+
+            // Full-width texture rectangles in this game are 2D art (title screen, menu photos): keep them 4:3 and
+            // centered with the Expand aspect ratio instead of stretching them. Framebuffer copies and fill rectangle
+            // clears still stretch.
+            state->rdp->extended.global.adjustFullWidthRects = true;
         }
 
         void setup(GBI *gbi) {

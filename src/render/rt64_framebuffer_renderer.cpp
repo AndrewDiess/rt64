@@ -1433,7 +1433,9 @@ namespace RT64 {
 
         const float SimilarityPercentage = 0.1f; // TODO: Make more strict once VI ratios are in.
         const float scissorRatio = static_cast<float>(fbPair.scissorRect.width(false, true)) / static_cast<float>(fbPair.scissorRect.height(false, true));
-        const bool adjustRatio = (abs((scissorRatio / p.aspectRatioSource) - 1.0f) < SimilarityPercentage);
+        // The scissor is in framebuffer pixels, so compare it with the framebuffer's pixel shape (which differs from
+        // the displayed shape when the VI scales the axes differently).
+        const bool adjustRatio = (abs((scissorRatio / p.aspectRatioPixelSource) - 1.0f) < SimilarityPercentage);
         const float aspectRatioScale = adjustRatio ? (p.aspectRatioTarget / p.aspectRatioSource) : 1.0f;
         InstanceDrawCall instanceDrawCall;
         interop::RenderIndices renderIndices;
@@ -1488,8 +1490,14 @@ namespace RT64 {
                 // The call's scissor spans the whole width of the framebuffer pair scissor. Custom origin must not be in use to be able to use the stretched viewport.
                 const auto &viewport = drawData.rspViewports[proj.transformsIndex];
                 FixedRect intersectionRect = proj.scissorRect.intersection(viewport.rect(viewportClipRatios));
-                bool coversWholeWidth = !intersectionRect.isEmpty() && (intersectionRect.ulx <= fbPair.scissorRect.ulx) && (intersectionRect.lrx >= fbPair.scissorRect.lrx);
-                bool horizontalRatio = !intersectionRect.isEmpty() && (intersectionRect.width(true, true) > intersectionRect.height(true, true));
+                // One pixel (4 in 10.2) of slack: games commonly scissor to width - 1 in one pass and to the full
+                // width in another (Rogue Squadron's intro: 399 vs 400), which otherwise kept the scene 4:3.
+                const int32_t OnePixel = 4;
+                bool coversWholeWidth = !intersectionRect.isEmpty() && (intersectionRect.ulx <= fbPair.scissorRect.ulx + OnePixel) && (intersectionRect.lrx + OnePixel >= fbPair.scissorRect.lrx);
+                // Compare the shape as displayed: framebuffer pixels aren't square when the VI scales the axes
+                // differently (Rogue Squadron's 400x448 intro framebuffer is shown at about 4:3).
+                const float pixelToDisplay = (p.aspectRatioPixelSource > 0.0f) ? (p.aspectRatioSource / p.aspectRatioPixelSource) : 1.0f;
+                bool horizontalRatio = !intersectionRect.isEmpty() && ((intersectionRect.width(true, true) * pixelToDisplay) > intersectionRect.height(true, true));
                 bool useWideViewport = (viewportOrigin == G_EX_ORIGIN_NONE) && coversWholeWidth && horizontalRatio;
                 if (useWideViewport) {
                     projInvRatioScale = 1.0f;
@@ -1644,8 +1652,14 @@ namespace RT64 {
 
                             // The call's scissor spans the whole width of the framebuffer pair scissor. The rect must not be using extended origins.
                             const bool regularOrigins = (call.callDesc.rectLeftOrigin == G_EX_ORIGIN_NONE) && (call.callDesc.rectRightOrigin == G_EX_ORIGIN_NONE);
-                            const bool coversScissorWidth = regularOrigins && (call.callDesc.rect.ulx <= fbPair.scissorRect.ulx) && (call.callDesc.rect.lrx >= fbPair.scissorRect.lrx);
-                            if ((tileCopiesUsed || coversScissorWidth || call.callDesc.rectAspect == G_EX_ASPECT_STRETCH) && (call.callDesc.rectAspect != G_EX_ASPECT_ADJUST)) {
+                            const bool spansScissorWidth = regularOrigins && (call.callDesc.rect.ulx <= fbPair.scissorRect.ulx) && (call.callDesc.rect.lrx >= fbPair.scissorRect.lrx);
+                            const bool coversScissorWidth = spansScissorWidth && !call.callDesc.adjustFullWidthRects;
+
+                            // With adjustFullWidthRects, only full-width framebuffer copies stretch. Rogue Squadron
+                            // draws its title image as 64-pixel tiles from RAM where the intro's framebuffers were,
+                            // which count as tile copies but are 2D art.
+                            const bool tileCopiesStretch = tileCopiesUsed && (!call.callDesc.adjustFullWidthRects || spansScissorWidth);
+                            if ((tileCopiesStretch || coversScissorWidth || call.callDesc.rectAspect == G_EX_ASPECT_STRETCH) && (call.callDesc.rectAspect != G_EX_ASPECT_ADJUST)) {
                                 invRatioScale = 1.0f;
                             }
                             else {

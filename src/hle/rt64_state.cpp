@@ -107,6 +107,7 @@ namespace RT64 {
         drawCall.rectLeftOrigin = G_EX_ORIGIN_NONE;
         drawCall.rectRightOrigin = G_EX_ORIGIN_NONE;
         drawCall.rectAspect = G_EX_ASPECT_AUTO;
+        drawCall.adjustFullWidthRects = false;
         drawCall.scissorRect.reset();
         drawCall.scissorMode = 0;
         drawCall.scissorLeftOrigin = G_EX_ORIGIN_NONE;
@@ -1293,6 +1294,7 @@ namespace RT64 {
                         drawParams.rasterShaderCache = ext.rasterShaderCache;
                         drawParams.resolutionScale = resolutionScale;
                         drawParams.aspectRatioSource = 1.0f;
+                        drawParams.aspectRatioPixelSource = 1.0f;
                         drawParams.aspectRatioTarget = 1.0f;
                         drawParams.extAspectPercentage = 0.0f;
                         drawParams.horizontalMisalignment = 0.0f;
@@ -1620,7 +1622,11 @@ namespace RT64 {
         }
 
         if (viHistory.top().vi.visible()) {
-            workload.viFbSize = viHistory.top().vi.fbSize();
+            const VI &topVI = viHistory.top().vi;
+            workload.viFbSize = topVI.fbSize();
+            const float activeWidth = float(topVI.hRegion.hEnd) - float(topVI.hRegion.hStart);
+            const float activeHeight = float(topVI.vRegion.vEnd) - float(topVI.vRegion.vStart);
+            workload.viDisplayAspect = ((activeWidth > 0.0f) && (activeHeight > 0.0f)) ? (activeWidth / activeHeight) : 0.0f;
         }
 
         // Log and reset profilers.
