@@ -100,7 +100,21 @@ namespace RT64 {
         // on the screen. To work around that, the viewport the buffer will be drawn in will be expanded so only
         // the region of interest is rendered. A scissor will cut it off correctly according to the coordinates
         // specified by the VI.
-        const hlslpp::float2 sdSize = removeBlackBorders ? hlslpp::float2(vi.fbSize()) : hlslpp::float2(320.0f, 240.0f);
+        hlslpp::float2 sdSize = removeBlackBorders ? hlslpp::float2(vi.fbSize()) : hlslpp::float2(320.0f, 240.0f);
+
+        // The TV shows the framebuffer stretched over the VI's active area, which is hEnd - hStart
+        // dots wide and vEnd - vStart half-lines tall (640 x 480 of those make a 4:3 picture). Use
+        // that shape instead of the framebuffer's pixel count, which only matches it when the VI
+        // scales both axes equally. Star Wars: Rogue Squadron renders its intro into a 400x448
+        // framebuffer that the VI stretches to the full width (x scale 0.625), shown as a narrow
+        // column before.
+        if (removeBlackBorders && (sdSize.y > 0.0f)) {
+            const float activeWidth = float(vi.hRegion.hEnd) - float(vi.hRegion.hStart);
+            const float activeHeight = float(vi.vRegion.vEnd) - float(vi.vRegion.vStart);
+            if ((activeWidth > 0.0f) && (activeHeight > 0.0f)) {
+                sdSize.x = sdSize.y * (activeWidth / activeHeight);
+            }
+        }
         const hlslpp::float2 hdSize = computeHDSize(sdSize, resolutionScale, downsamplingScale);
         const hlslpp::float2 windowSize = { float(swapChain->getWidth()), float(swapChain->getHeight()) };
 
