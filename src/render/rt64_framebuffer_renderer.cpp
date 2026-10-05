@@ -3,6 +3,7 @@
 //
 
 #include "rt64_framebuffer_renderer.h"
+#include "rt64_projection_processor.h"
 
 #include "../include/rt64_extended_gbi.h"
 
@@ -1490,15 +1491,8 @@ namespace RT64 {
                 // The call's scissor spans the whole width of the framebuffer pair scissor. Custom origin must not be in use to be able to use the stretched viewport.
                 const auto &viewport = drawData.rspViewports[proj.transformsIndex];
                 FixedRect intersectionRect = proj.scissorRect.intersection(viewport.rect(viewportClipRatios));
-                // One pixel (4 in 10.2) of slack: games commonly scissor to width - 1 in one pass and to the full
-                // width in another (Rogue Squadron's intro: 399 vs 400), which otherwise kept the scene 4:3.
-                const int32_t OnePixel = 4;
-                bool coversWholeWidth = !intersectionRect.isEmpty() && (intersectionRect.ulx <= fbPair.scissorRect.ulx + OnePixel) && (intersectionRect.lrx + OnePixel >= fbPair.scissorRect.lrx);
-                // Compare the shape as displayed: framebuffer pixels aren't square when the VI scales the axes
-                // differently (Rogue Squadron's 400x448 intro framebuffer is shown at about 4:3).
                 const float pixelToDisplay = (p.aspectRatioPixelSource > 0.0f) ? (p.aspectRatioSource / p.aspectRatioPixelSource) : 1.0f;
-                bool horizontalRatio = !intersectionRect.isEmpty() && ((intersectionRect.width(true, true) * pixelToDisplay) > intersectionRect.height(true, true));
-                bool useWideViewport = (viewportOrigin == G_EX_ORIGIN_NONE) && coversWholeWidth && horizontalRatio;
+                bool useWideViewport = usesWideViewport(intersectionRect, fbPair.scissorRect, viewportOrigin, pixelToDisplay);
                 if (useWideViewport) {
                     projInvRatioScale = 1.0f;
                 }

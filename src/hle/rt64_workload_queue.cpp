@@ -142,7 +142,8 @@ namespace RT64 {
             workloadConfig.aspectRatioSource = viDisplayAspect;
         }
 
-        const auto ratioMode = ext.sharedResources->userConfig.aspectRatio;
+        const bool forceOriginal = ext.sharedResources->forceOriginalAspectRatio.load();
+        const auto ratioMode = forceOriginal ? UserConfiguration::AspectRatio::Original : ext.sharedResources->userConfig.aspectRatio;
         switch (ratioMode) {
         case UserConfiguration::AspectRatio::Expand:
             if ((ext.sharedResources->swapChainWidth > 0) && (ext.sharedResources->swapChainHeight > 0)) {
@@ -164,7 +165,7 @@ namespace RT64 {
         }
 
         // Compute the extended GBI aspect ratio percentage to be used for the frame.
-        const auto extRatioMode = ext.sharedResources->userConfig.extAspectRatio;
+        const auto extRatioMode = forceOriginal ? UserConfiguration::AspectRatio::Original : ext.sharedResources->userConfig.extAspectRatio;
         switch (extRatioMode) {
         case UserConfiguration::AspectRatio::Expand:
             workloadConfig.extAspectPercentage = 1.0f;
@@ -323,6 +324,7 @@ namespace RT64 {
             projParams.curFrameWeight = curFrameWeight;
             projParams.prevFrameWeight = prevFrameWeight;
             projParams.aspectRatioScale = workloadConfig.aspectRatioScale;
+            projParams.pixelToDisplay = (workloadConfig.aspectRatioPixelSource > 0.0f) ? (workloadConfig.aspectRatioSource / workloadConfig.aspectRatioPixelSource) : 1.0f;
             projectionProcessor.process(projParams);
             projectionProcessor.upload(projParams);
             uploadProjections = true;

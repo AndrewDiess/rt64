@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <atomic>
+
 #include <mutex>
 
 #include "common/rt64_common.h"
@@ -41,6 +43,10 @@ namespace RT64 {
         bool fbConfigChanged = true;
         bool newConfigValidated = false;
         std::mutex configurationMutex;
+
+        // Set by the host while the game shows content that must stay at its original aspect ratio (Rogue Squadron:
+        // everything but in-flight gameplay). Treated as the Original aspect ratio regardless of the user setting.
+        std::atomic<bool> forceOriginalAspectRatio = false;
 
         // Render resource managers.
         FramebufferManager framebufferManager;
