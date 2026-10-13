@@ -1555,12 +1555,25 @@ namespace RT64 {
                     // to that edge of the wide target. Rogue Squadron clears the ground below the horizon with two fills
                     // split at the middle column, so neither spans the width and the extended sides stayed uncleared.
                     if (call.callDesc.adjustFullWidthRects && (invRatioScale != 1.0f)) {
-                        if (call.callDesc.rect.ulx <= fbPair.scissorRect.ulx) {
+                        const bool reachesLeft = (call.callDesc.rect.ulx <= fbPair.scissorRect.ulx);
+                        const bool reachesRight = (call.callDesc.rect.lrx >= fbPair.scissorRect.lrx);
+                        if (reachesLeft) {
                             clearRect.rect.left = 0;
                         }
 
-                        if (call.callDesc.rect.lrx >= fbPair.scissorRect.lrx) {
+                        if (reachesRight) {
                             clearRect.rect.right = int32_t(std::lround(wideWidth));
+                        }
+
+                        // Each ground fill's top is the horizon's height at the 4:3 edge of its half. With a tilted horizon
+                        // the horizon keeps rising past that edge, so in the extended area a wedge between the sky and the
+                        // fill was drawn by nothing and kept the previous frame. Ground fills (reaching a side and the
+                        // bottom) therefore start at the top of the scissor: the sky is drawn over everything above the
+                        // horizon afterwards, and the wedge gets the fill (the distant fog color, and far depth).
+                        const int32_t OnePixel = 4;
+                        const bool reachesBottom = (call.callDesc.rect.lry + OnePixel >= fbPair.scissorRect.lry);
+                        if ((reachesLeft || reachesRight) && reachesBottom) {
+                            clearRect.rect.top = std::min(clearRect.rect.top, int32_t(std::lround(fbPair.scissorRect.top(true) * p.resolutionScale.y)));
                         }
                     }
                 }
