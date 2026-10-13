@@ -572,13 +572,20 @@ namespace RT64 {
                 depthImg.formatChanged = depthFb->widthChanged || depthFb->sizChanged || depthFb->rdramChanged;
                 depthFb->clearChanged();
 
-                // Detect a fast path by checking if the framebuffer pair previous to the current one only did fill rects.
-                // This is a very good indicator that the previous framebuffer pair was only intended to clear the depth
-                // buffer and we can skip the color to depth conversion.
-                int previousFbPairIndex = workload.currentFramebufferPairIndex() - 1;
-                if (previousFbPairIndex >= 0) {
+                // Detect a fast path by checking if the framebuffer pairs previous to the current one only did fill rects.
+                // This is a very good indicator that those framebuffer pairs were only intended to clear the depth
+                // buffer and we can skip the color to depth conversion. Walk back over every directly preceding
+                // fill-only pair: games can clear the depth buffer in several pieces with color fills in between
+                // (Rogue Squadron fills depth and color below the horizon as two halves, alternating). Only the last
+                // piece used to be detected; the others became color writes to the depth address, whose conversion to
+                // depth left stale depth in the high resolution target (parts of objects vanished with Expand).
+                for (int previousFbPairIndex = workload.currentFramebufferPairIndex() - 1; previousFbPairIndex >= 0; previousFbPairIndex--) {
                     FramebufferPair &previousFbPair = workload.fbPairs[previousFbPairIndex];
-                    if (previousFbPair.fillRectOnly && (previousFbPair.colorImage.address == depthImg.address) && (previousFbPair.colorImage.siz == G_IM_SIZ_16b)) {
+                    if (!previousFbPair.fillRectOnly) {
+                        break;
+                    }
+
+                    if ((previousFbPair.colorImage.address == depthImg.address) && (previousFbPair.colorImage.siz == G_IM_SIZ_16b)) {
                         previousFbPair.fastPaths.clearDepthOnly = true;
                     }
                 }
