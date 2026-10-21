@@ -15,6 +15,7 @@
 #include "rt64_gbi_f3dex2.h"
 #include "rt64_gbi_f3dwave.h"
 #include "rt64_gbi_f3dzex2.h"
+#include "rt64_gbi_f5rogue.h"
 #include "rt64_gbi_l3dex2.h"
 #include "rt64_gbi_rdp.h"
 #include "rt64_gbi_s2dex.h"
@@ -153,6 +154,7 @@ namespace RT64 {
     const GBIInstance   L3DEX2_FIFO_ACCLAIM       = { "L3DEX2.fifo 2.05 (Acclaim)",                GBIUCode::Unknown,     { false,  false,  false,  false,  false } }; // Needs confirmation.
     const GBIInstance   L3DEX2_FIFO_2_08          = { "L3DEX2.fifo 2.08",                          GBIUCode::L3DEX2,      { false,  false,  false,  false,  false } }; // Needs confirmation.
     const GBIInstance   ZSORTP_0_33               = { "ZSortp 0.33",                               GBIUCode::Unknown,     { false,  false,  false,  false,  false } }; // Needs confirmation.
+    const GBIInstance   F5ROGUE                   = { "Factor 5 (Rogue Squadron)",                 GBIUCode::F5ROGUE,     { false,  false,  false,  false,  false } };
     
     // ****************************************************************************************
     // * Database of known UCode text and data segments.                                      *
@@ -160,7 +162,7 @@ namespace RT64 {
     // 
     //                  Length      Hash                    Known instances               
     //     
-    static std::array<GBISegment, 94> textSegments = {
+    static std::array<GBISegment, 95> textSegments = {
             GBISegment{ 0x1408,     0x9C0926F5E466BE70ULL,  { &F3D_SDK_E } }, // Needs confirmation.
             GBISegment{ 0x1400,     0x34EAA6E921BCF1B2ULL,  { &F3D_SDK_F, &F3D_SDK_UNKNOWN_G, &F3D_SDK_UNKNOWN_H } }, // Needs confirmation.
             GBISegment{ 0x1408,     0x3E05E9BBE814C700ULL,  { &F3D_FIFO_SDK_E } }, // Needs confirmation.
@@ -255,9 +257,10 @@ namespace RT64 {
             GBISegment{ 0x1190,     0x019210E4F59B27C1ULL,  { &L3DEX2_FIFO_ACCLAIM } }, // Needs confirmation.
             GBISegment{ 0x1190,     0x60B6BA671EE6F1F6ULL,  { &L3DEX2_FIFO_2_08 } }, // Needs confirmation.
             GBISegment{ 0x10B0,     0xE8028E4BC6529E6EULL,  { &ZSORTP_0_33 } }, // Needs confirmation.
+            GBISegment{ 0x1000,     0x8FA73326CC37F993ULL,  { &F5ROGUE } },
     };
 
-    static std::array<GBISegment, 105> dataSegments = {
+    static std::array<GBISegment, 106> dataSegments = {
             GBISegment{ 0x800,      0xEEB10D73400213B3ULL,  { &F3D_SDK_E } }, // Needs confirmation.
             GBISegment{ 0x800,      0x49651E384B48F694ULL,  { &F3D_SDK_F } }, // Needs confirmation.
             GBISegment{ 0x800,      0x1A736198F90E81C5ULL,  { &F3D_SDK_UNKNOWN_G } }, // Needs confirmation.
@@ -363,6 +366,7 @@ namespace RT64 {
             GBISegment{ 0x3F0,      0x772E4F4BD7F82DEFULL,  { &L3DEX2_FIFO_ACCLAIM } }, // Needs confirmation.
             GBISegment{ 0x3F0,      0xE261C98A63863DB4ULL,  { &L3DEX2_FIFO_2_08 } }, // Needs confirmation.
             GBISegment{ 0x400,      0x8F5D64011662220CULL,  { &ZSORTP_0_33 } }, // Needs confirmation.
+            GBISegment{ 0x400,      0xC77C64200B43484BULL,  { &F5ROGUE } },
     };
 
     static bool textAndDataSegmentsSorted = false;
@@ -498,6 +502,9 @@ namespace RT64 {
                 break;
             case GBIUCode::L3DEX2:
                 GBI_L3DEX2::setup(&gbi);
+                break;
+            case GBIUCode::F5ROGUE:
+                GBI_F5ROGUE::setup(&gbi);
                 break;
             default:
                 assert(false && "Unknown UCode.");
