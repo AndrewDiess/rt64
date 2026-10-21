@@ -14,6 +14,7 @@
 namespace RT64 {
     typedef void (*GBIReset)(State *state);
     typedef void (*GBIFunction)(State *state, DisplayList **dl);
+    typedef DisplayList *(*GBIDisplayListStart)(State *state, uint32_t dlStartAddress, DisplayList *dlStart);
 
     enum class GBIUCode : uint32_t {
         Unknown = 0,
@@ -59,6 +60,11 @@ namespace RT64 {
         GBIUCode ucode = GBIUCode::Unknown;
         GBIReset resetFromTask = nullptr;
         GBIReset resetFromLoad = nullptr;
+
+        // Optional. Returns the first command to run for a task's display list, for microcodes
+        // whose display lists don't start with a command (e.g. a header).
+        GBIDisplayListStart displayListStart = nullptr;
+
         GBIFunction map[UCODE_MAP_SIZE] = {};
         std::unordered_map<F3DENUM, uint32_t> constants;
         GBIFlags flags;

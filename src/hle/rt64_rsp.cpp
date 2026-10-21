@@ -431,6 +431,27 @@ namespace RT64 {
         vertexColorPDAddress = fromSegmentedMasked(address);
     }
 
+    void RSP::setVertexF5Rogue(uint32_t rdramAddress, const Vertex *srcVertices, uint32_t vtxCount, uint32_t dstIndex) {
+        if ((dstIndex >= RSP_MAX_VERTICES) || ((dstIndex + vtxCount) > RSP_MAX_VERTICES)) {
+            assert(false && "Vertex indices are not valid. DL is possibly corrupted.");
+            return;
+        }
+
+        // The vertices were already decoded by the GBI. The source vertices in RDRAM are 8 bytes each.
+        memcpy(&vertices[dstIndex], srcVertices, sizeof(Vertex) * vtxCount);
+        setVertexCommon<true, 8>(rdramAddress, dstIndex, dstIndex + vtxCount);
+
+        // The texture coordinates are already final (s10.5), so the texture scale is not applied.
+        const int workloadCursor = state->ext.workloadQueue->writeCursor;
+        Workload &workload = state->ext.workloadQueue->workloads[workloadCursor];
+        auto &tcFloats = workload.drawData.tcFloats;
+        for (uint32_t i = dstIndex; i < (dstIndex + vtxCount); i++) {
+            const uint32_t globalIndex = indices[i];
+            tcFloats[globalIndex * 2 + 0] = vertices[i].s / 32.0f;
+            tcFloats[globalIndex * 2 + 1] = vertices[i].t / 32.0f;
+        }
+    }
+
     void RSP::setVertexSegmentV1(bool isEnabled, uint32_t vertexElement, uint32_t vertexAddress, uint32_t baseSegmentAddress) {
         extended.vertexAddresses[vertexElement] = vertexAddress;
         extended.baseSegmentAddresses[vertexElement] = baseSegmentAddress;
@@ -734,26 +755,20 @@ namespace RT64 {
         }
     }
 
-    void RSP::modifyVertex(uint16_t dstIndex, uint16_t dstAttribute, uint32_t value) {
-        if (dstIndex >= RSP_MAX_VERTICES) {
-            assert(false && "Vertex index is not valid. DL is possibly corrupted.");
-            return;
-        }
-
+    uint32_t RSP::unusedVertexGlobalIndex(uint16_t dstIndex) {
         // If the vertex was used already in the frame, then we create a new copy instead.
         const int workloadCursor = state->ext.workloadQueue->writeCursor;
         Workload &workload = state->ext.workloadQueue->workloads[workloadCursor];
-        auto &normColBytes = workload.drawData.normColBytes;
-        auto &tcFloats = workload.drawData.tcFloats;
-        auto &tcVelFloats = workload.drawData.tcVelFloats;
-        auto &fogIndices = workload.drawData.fogIndices;
-        auto &lightIndices = workload.drawData.lightIndices;
-        auto &lightCounts = workload.drawData.lightCounts;
-        auto &lookAtIndices = workload.drawData.lookAtIndices;
-        auto &modifyPosUints = workload.drawData.modifyPosUints;
-        auto &posScreen = workload.drawData.posScreen;
         uint32_t globalIndex = indices[dstIndex];
         if (used[dstIndex]) {
+            auto &normColBytes = workload.drawData.normColBytes;
+            auto &tcFloats = workload.drawData.tcFloats;
+            auto &tcVelFloats = workload.drawData.tcVelFloats;
+            auto &fogIndices = workload.drawData.fogIndices;
+            auto &lightIndices = workload.drawData.lightIndices;
+            auto &lightCounts = workload.drawData.lightCounts;
+            auto &lookAtIndices = workload.drawData.lookAtIndices;
+            auto &posScreen = workload.drawData.posScreen;
             auto &posFloats = workload.drawData.posFloats;
             auto &velFloats = workload.drawData.velFloats;
             auto &viewProjIndices = workload.drawData.viewProjIndices;
@@ -786,6 +801,27 @@ namespace RT64 {
             used[dstIndex] = false;
             globalIndex = indices[dstIndex];
         }
+
+        return globalIndex;
+    }
+
+    void RSP::modifyVertex(uint16_t dstIndex, uint16_t dstAttribute, uint32_t value) {
+        if (dstIndex >= RSP_MAX_VERTICES) {
+            assert(false && "Vertex index is not valid. DL is possibly corrupted.");
+            return;
+        }
+
+        const uint32_t globalIndex = unusedVertexGlobalIndex(dstIndex);
+        const int workloadCursor = state->ext.workloadQueue->writeCursor;
+        Workload &workload = state->ext.workloadQueue->workloads[workloadCursor];
+        auto &normColBytes = workload.drawData.normColBytes;
+        auto &tcFloats = workload.drawData.tcFloats;
+        auto &fogIndices = workload.drawData.fogIndices;
+        auto &lightIndices = workload.drawData.lightIndices;
+        auto &lightCounts = workload.drawData.lightCounts;
+        auto &lookAtIndices = workload.drawData.lookAtIndices;
+        auto &modifyPosUints = workload.drawData.modifyPosUints;
+        auto &posScreen = workload.drawData.posScreen;
 
         // Modify the attributes.
         switch (dstAttribute) {
@@ -832,6 +868,28 @@ namespace RT64 {
             assert(false && "Unsupported modify vertex");
             break;
         }
+    }
+
+    void RSP::setVertexColorTexcoord(uint16_t dstIndex, uint32_t color, float s, float t) {
+        if (dstIndex >= RSP_MAX_VERTICES) {
+            assert(false && "Vertex index is not valid. DL is possibly corrupted.");
+            return;
+        }
+
+        const uint32_t globalIndex = unusedVertexGlobalIndex(dstIndex);
+        const int workloadCursor = state->ext.workloadQueue->writeCursor;
+        Workload &workload = state->ext.workloadQueue->workloads[workloadCursor];
+        auto &drawData = workload.drawData;
+        drawData.normColBytes[globalIndex * 4 + 0] = (color >> 24) & 0xFF;
+        drawData.normColBytes[globalIndex * 4 + 1] = (color >> 16) & 0xFF;
+        drawData.normColBytes[globalIndex * 4 + 2] = (color >> 8) & 0xFF;
+        drawData.normColBytes[globalIndex * 4 + 3] = color & 0xFF;
+        drawData.tcFloats[globalIndex * 2 + 0] = s;
+        drawData.tcFloats[globalIndex * 2 + 1] = t;
+        drawData.fogIndices[globalIndex] = 0;
+        drawData.lightIndices[globalIndex] = 0;
+        drawData.lightCounts[globalIndex] = 0;
+        drawData.lookAtIndices[globalIndex] = 0;
     }
     
     void RSP::branchZ(uint32_t branchDl, uint16_t vtxIndex, uint32_t zValue, DisplayList **dl) {

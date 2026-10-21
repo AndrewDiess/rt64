@@ -167,6 +167,10 @@ namespace RT64 {
 
         // Run the command interpreter.
         DisplayList *dl = dlStart;
+        if (hleGBI->displayListStart != nullptr) {
+            dl = hleGBI->displayListStart(state, dlStartAdddress, dlStart);
+        }
+
         uint8_t opCode;
         GBIFunction func;
         while (dl != nullptr) {

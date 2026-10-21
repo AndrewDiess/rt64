@@ -255,12 +255,15 @@ namespace RT64 {
         void setVertexPD(uint32_t address, uint32_t vtxCount, uint32_t dstIndex);
         void setVertexEXV1(uint32_t address, uint32_t vtxCount, uint32_t dstIndex);
         void setVertexColorPD(uint32_t address);
+        void setVertexF5Rogue(uint32_t rdramAddress, const Vertex *srcVertices, uint32_t vtxCount, uint32_t dstIndex);
         void setVertexSegmentV1(bool isEnabled, uint32_t vertexElement, uint32_t vertexAddress, uint32_t baseSegmentAddress);
         template<uint32_t floatCount, uint32_t vertexSize>
         void readExtendedVertexSegment(uint32_t rdramAddress, uint32_t dstIndex, uint32_t dstMax, uint32_t globalIndex, uint32_t vertexElement, std::vector<float> &floatsVector);
         template<bool addEmptyVelocity, uint32_t vertexSize>
         void setVertexCommon(uint32_t rdramAddress, uint32_t dstIndex, uint32_t dstMax);
+        uint32_t unusedVertexGlobalIndex(uint16_t dstIndex);
         void modifyVertex(uint16_t dstIndex, uint16_t dstAttribute, uint32_t value);
+        void setVertexColorTexcoord(uint16_t dstIndex, uint32_t color, float s, float t);
         void setGeometryMode(uint32_t mask);
         void pushGeometryMode();
         void popGeometryMode();
