@@ -193,14 +193,125 @@ namespace RT64 {
             return clamp32((int64_t(a) * b) >> 16);
         }
 
-        // 1/x for an s15.16 value, as an s15.16 value. The microcode uses VRCPH/VRCPL and one Newton-Raphson step,
-        // which is within a few units of the exact result.
-        static int32_t reciprocal(int32_t value) {
-            if (value == 0) {
-                return INT32_MAX;
+        // One lane of the RSP's vector multiplies, for the vertex math that has to match the microcode bit for bit
+        // (z/w feeds the fog value, where one unit in the last place moves the fog by ten or more). acc is the 48-bit
+        // accumulator.
+        struct RspLane {
+            int64_t acc = 0;
+
+            void add(int64_t value, bool accumulate) {
+                const int64_t sum = (accumulate ? acc : 0) + value;
+                const int64_t wrapped = sum & ((int64_t(1) << 48) - 1);
+                acc = (wrapped & (int64_t(1) << 47)) ? (wrapped - (int64_t(1) << 48)) : wrapped;
             }
 
-            return clamp32((int64_t(1) << 32) / value);
+            // VMUDL/VMADL: unsigned x unsigned, the upper 16 bits of the product.
+            void mulLow(uint16_t a, uint16_t b, bool accumulate) { add(int64_t((uint32_t(a) * uint32_t(b)) >> 16), accumulate); }
+
+            // VMUDM/VMADM: signed x unsigned.
+            void mulMid(int16_t a, uint16_t b, bool accumulate) { add(int64_t(a) * b, accumulate); }
+
+            // VMUDN/VMADN: unsigned x signed.
+            void mulMidN(uint16_t a, int16_t b, bool accumulate) { add(int64_t(a) * b, accumulate); }
+
+            // VMUDH/VMADH: signed x signed, 16 bits up.
+            void mulHigh(int16_t a, int16_t b, bool accumulate) { add((int64_t(a) * b) * 65536, accumulate); }
+
+            // Result of the M and H forms: accumulator bits 16-31, clamped as a signed value.
+            int16_t high() const { return clamp16(acc >> 16); }
+
+            // Result of the N form: accumulator bits 0-15, or 0 / 0xFFFF when bits 16-47 don't fit a signed halfword.
+            uint16_t low() const {
+                const int64_t middle = acc >> 16;
+                if (middle < INT16_MIN) {
+                    return 0;
+                }
+                else if (middle > INT16_MAX) {
+                    return 0xFFFF;
+                }
+                else {
+                    return uint16_t(acc);
+                }
+            }
+        };
+
+        static int32_t combine(int16_t high, uint16_t low) {
+            return int32_t((uint32_t(uint16_t(high)) << 16) | low);
+        }
+
+        // a x b for two s15.16 values, the way the microcode multiplies 32-bit values (VMUDL, VMADM, VMADN, VMADH): the
+        // fraction x fraction product is truncated before it's added, and the low half is taken before the last step.
+        static int32_t rspMultiply32(int32_t a, int32_t b) {
+            RspLane lane;
+            lane.mulLow(uint16_t(a), uint16_t(b), false);
+            lane.mulMid(int16_t(a >> 16), uint16_t(b), true);
+            lane.mulMidN(uint16_t(a), int16_t(b >> 16), true);
+            const uint16_t low = lane.low();
+            lane.mulHigh(int16_t(a >> 16), int16_t(b >> 16), true);
+            return combine(lane.high(), low);
+        }
+
+        // a x b for an s15.16 value and an unsigned 0.16 value (VMUDL, VMADM, then the low half read with VMADN).
+        static int32_t rspMultiplyFraction(int32_t a, uint16_t b) {
+            RspLane lane;
+            lane.mulLow(uint16_t(a), b, false);
+            lane.mulMid(int16_t(a >> 16), b, true);
+            return combine(lane.high(), lane.low());
+        }
+
+        // Entry i of the RSP's reciprocal table: 1 / (1 + i / 512) as a 16-bit fraction (entry 0 is all ones).
+        static uint16_t rspReciprocalTable(uint32_t i) {
+            if (i == 0) {
+                return 0xFFFF;
+            }
+
+            return uint16_t((((uint64_t(1) << 34) / (512 + i)) + 1) >> 8);
+        }
+
+        // VRCPH + VRCPL with a 32-bit input: the normalized input picks a table entry that's shifted back. Negative
+        // inputs use the one's complement of the result (and of the input below -32768).
+        static int32_t rspReciprocal32(int32_t input) {
+            if (input == 0) {
+                return INT32_MAX;
+            }
+            else if (input == -32768) {
+                return int32_t(0xFFFF0000U);
+            }
+
+            const uint32_t mask = (input < 0) ? 0xFFFFFFFFU : 0;
+            uint32_t data = uint32_t(input) ^ mask;
+            if (input > -32768) {
+                data -= mask;
+            }
+
+            uint32_t shift = 0;
+            while ((shift < 31) && ((data & (0x80000000U >> shift)) == 0)) {
+                shift++;
+            }
+
+            const uint32_t index = uint32_t(((uint64_t(data) << shift) & 0x7FC00000U) >> 22);
+            uint32_t result = (0x10000U | rspReciprocalTable(index)) << 14;
+            result = (result >> (31 - shift)) ^ mask;
+            return int32_t(result);
+        }
+
+        // 1/w' as the microcode computes it (IMEM 0x179C): the RSP reciprocal doubled, then one Newton-Raphson step
+        // r * (2 - r * w').
+        static int32_t rspInverse(int32_t value) {
+            const int32_t first = rspReciprocal32(value);
+
+            // x 2 with VMUDN, VMADH (2 is in v30[2]).
+            RspLane lane;
+            lane.mulMidN(uint16_t(first), 2, false);
+            lane.mulHigh(int16_t(first >> 16), 2, true);
+            const int32_t r = combine(lane.high(), lane.low());
+
+            // 2 - r * w' with VSUBC/VSUB: the borrow of the low halves goes into the clamped high half.
+            const int32_t product = rspMultiply32(r, value);
+            const uint16_t errorLow = uint16_t(0 - uint16_t(product));
+            const int32_t borrow = (uint16_t(product) != 0) ? 1 : 0;
+            const int16_t errorHigh = clamp16(int32_t(2) - int16_t(product >> 16) - borrow);
+            return rspMultiply32(r, combine(errorHigh, errorLow));
         }
 
         // VCH/VCL clip test on 32-bit values: "below" is value <= -limit and "above" is value >= limit.
@@ -622,13 +733,13 @@ namespace RT64 {
 
             // 1/w' with w' = w * perspnorm. A negative 1/w' uses an integer part of 0x7FFF for the screen position.
             const uint16_t perspNorm = dmemRead16(DmemPerspNorm);
-            v.invW = reciprocal(mulFixed(w, perspNorm));
+            v.invW = rspInverse(rspMultiplyFraction(w, perspNorm));
             const int32_t screenInvW = (v.invW < 0) ? int32_t(0x7FFF0000U | (uint32_t(v.invW) & 0xFFFFU)) : v.invW;
 
             // Screen position: ndc * scale + translate, with ndc = clip * (1/w') * perspnorm. No y negation.
             int32_t ndc[3];
             for (uint32_t i = 0; i < 3; i++) {
-                ndc[i] = mulFixed(mulFixed(v.clip[i], screenInvW), perspNorm);
+                ndc[i] = rspMultiplyFraction(rspMultiply32(v.clip[i], screenInvW), perspNorm);
                 const int64_t screen = (int64_t(dmemReadS16(DmemViewportTranslate + i * 2)) << 16) + int64_t(ndc[i]) * dmemReadS16(DmemViewportScale + i * 2);
                 v.screen[i] = clamp16(screen >> 16);
                 if (i == 2) {
@@ -646,7 +757,7 @@ namespace RT64 {
                 const int32_t multiplier = dmemReadFixed(DmemFogMultiplier, DmemFogMultiplier + 2);
                 const int32_t offset = dmemReadFixed(DmemFogOffset, DmemFogOffset + 2);
                 const int16_t scale = dmemReadS16(DmemFogScale);
-                const int32_t product = mulFixed(ndc[2], multiplier);
+                const int32_t product = rspMultiply32(ndc[2], multiplier);
                 const uint32_t fractionSum = (uint32_t(product) & 0xFFFF) + (uint32_t(offset) & 0xFFFF);
                 const int16_t integerSum = clamp16(int64_t(product >> 16) + (offset >> 16) + int64_t(fractionSum >> 16));
                 const int64_t value = (int64_t(integerSum) << 16) | (fractionSum & 0xFFFF);
