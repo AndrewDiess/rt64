@@ -188,11 +188,6 @@ namespace RT64 {
             return int16_t(std::clamp<int64_t>(value, INT16_MIN, INT16_MAX));
         }
 
-        // Product of two s15.16 values (or s15.16 and an unsigned 0.16 value), floored and saturated.
-        static int32_t mulFixed(int32_t a, int64_t b) {
-            return clamp32((int64_t(a) * b) >> 16);
-        }
-
         // One lane of the RSP's vector multiplies, for the vertex math that has to match the microcode bit for bit
         // (z/w feeds the fog value, where one unit in the last place moves the fog by ten or more). acc is the 48-bit
         // accumulator.
@@ -1693,13 +1688,38 @@ namespace RT64 {
                 std::swap(size[0], size[1]);
             }
 
+            // The microcode's sequence (IMEM 0x1E18-0x1E40), lane by lane: size x 1/w' (VMUDM, VMADH), x perspnorm
+            // (VMUDL, VMADM, VMADN), x viewport scale / 2 (VMUDN, VMADH), x projection (VMUDL, VMADM, VMADN, VMADH). Only
+            // the integer part is used. Some steps read a register their previous step just wrote, as on the RSP.
             const uint16_t perspNorm = dmemRead16(DmemPerspNorm);
             int16_t half[2];
             for (uint32_t j = 0; j < 2; j++) {
-                const int32_t sizeOverW = mulFixed(clamp32(int64_t(size[j]) * v.invW), perspNorm);
-                const int32_t viewportHalf = dmemReadS16(DmemViewportScale + j * 2) >> 1;
-                const int32_t scaled = clamp32(int64_t(sizeOverW) * viewportHalf);
-                half[j] = clamp16(mulFixed(scaled, dmemMatrixElement(DmemProjection, j, j)) >> 16);
+                const int16_t viewportHalf = int16_t(dmemReadS16(DmemViewportScale + j * 2) >> 1);
+                const uint32_t projectionOffset = (j * 4 + j) * 2;
+                const int16_t projectionInteger = dmemReadS16(DmemProjection + projectionOffset);
+                const uint16_t projectionFraction = dmemRead16(DmemProjection + MatrixFractionOffset + projectionOffset);
+                RspLane lane;
+                lane.mulMid(size[j], uint16_t(v.invW), false);
+                int16_t fraction = lane.high();
+                lane.mulHigh(size[j], int16_t(v.invW >> 16), true);
+                int16_t integer = lane.high();
+
+                lane.mulLow(uint16_t(fraction), perspNorm, false);
+                lane.mulMid(integer, perspNorm, true);
+                integer = lane.high();
+                fraction = int16_t(lane.low());
+
+                lane.mulMidN(uint16_t(fraction), viewportHalf, false);
+                fraction = int16_t(lane.low());
+                lane.mulHigh(integer, viewportHalf, true);
+                integer = lane.high();
+
+                lane.mulLow(uint16_t(fraction), projectionFraction, false);
+                lane.mulMid(integer, projectionFraction, true);
+                fraction = lane.high();
+                lane.mulMidN(uint16_t(fraction), projectionInteger, true);
+                lane.mulHigh(integer, projectionInteger, true);
+                half[j] = lane.high();
             }
 
             int16_t ul[2], lr[2];
@@ -1715,10 +1735,18 @@ namespace RT64 {
                 std::swap(stepHalf[0], stepHalf[1]);
             }
 
+            // VRCP of the half extent, x 0x80 (VMUDL, VMADM, VMADN), then extent x that (VMUDL, VMADM, VMADN, VMADH). The
+            // extent's fraction register holds whatever the vector unit last left there; 0 is used here.
             int32_t step[2];
             for (uint32_t j = 0; j < 2; j++) {
-                const int32_t inverse = (stepHalf[j] == 0) ? INT32_MAX : clamp32((int64_t(1) << 31) / stepHalf[j]);
-                step[j] = clamp16((int64_t(extent[j]) * mulFixed(inverse, 0x80)) >> 16);
+                const int32_t inverse = rspMultiplyFraction(rspReciprocal32(stepHalf[j]), 0x80);
+                RspLane lane;
+                lane.mulLow(0, uint16_t(inverse), false);
+                lane.mulMid(extent[j], uint16_t(inverse), true);
+                const int16_t fraction = lane.high();
+                lane.mulMidN(uint16_t(fraction), int16_t(inverse >> 16), true);
+                lane.mulHigh(extent[j], int16_t(inverse >> 16), true);
+                step[j] = lane.high();
             }
 
             // Mirroring starts at the far end and steps back.
