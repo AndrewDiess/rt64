@@ -1684,7 +1684,13 @@ namespace RT64 {
                             break;
                         }
 
-                        triangles.scissor = convertFixedRect(call.callDesc.scissorRect, p.resolutionScale, p.fbWidth, invRatioScale, extOriginPercentage, int32_t(horizontalMisalignment), call.callDesc.scissorLeftOrigin, call.callDesc.scissorRightOrigin);
+                        // Draws anchored to a screen edge can sit outside the centered 4:3 area; give them the full width
+                        // when their scissor spans the screen, instead of a 4:3 scissor that would cut them off.
+                        const bool rectAnchored = (proj.type == Projection::Type::Rectangle) && ((call.callDesc.rectLeftOrigin != G_EX_ORIGIN_NONE) || (call.callDesc.rectRightOrigin != G_EX_ORIGIN_NONE));
+                        const bool viewportAnchored = proj.usesViewport() && (viewportOrigin < G_EX_ORIGIN_NONE);
+                        const bool scissorSpansWidth = (call.callDesc.scissorRect.ulx <= fbPair.scissorRect.ulx + 4) && (call.callDesc.scissorRect.lrx + 4 >= fbPair.scissorRect.lrx);
+                        const float scissorRatioScale = ((rectAnchored || viewportAnchored) && scissorSpansWidth) ? 1.0f : invRatioScale;
+                        triangles.scissor = convertFixedRect(call.callDesc.scissorRect, p.resolutionScale, p.fbWidth, scissorRatioScale, extOriginPercentage, int32_t(horizontalMisalignment), call.callDesc.scissorLeftOrigin, call.callDesc.scissorRightOrigin);
 
                         bool usesViewport = (proj.type == Projection::Type::Perspective) || (proj.type == Projection::Type::Orthographic);
                         if (usesViewport) {

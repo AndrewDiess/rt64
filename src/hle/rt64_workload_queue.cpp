@@ -7,6 +7,7 @@
 #include "common/rt64_thread.h"
 
 #include "rt64_present_queue.h"
+#include "render/rt64_vi_renderer.h"
 
 #define ENABLE_HIGH_RESOLUTION_RENDERER 1
 
@@ -142,7 +143,9 @@ namespace RT64 {
             workloadConfig.aspectRatioSource = viDisplayAspect;
         }
 
-        const bool forceOriginal = ext.sharedResources->forceOriginalAspectRatio.load();
+        // Letterboxed shots stay 4:3 (VIRenderer::isLetterboxed; viDisplayAspect is that same active-area shape).
+        const bool letterboxed = ext.sharedResources->enhancementConfig.presentation.removeBlackBorders && (viDisplayAspect > VIRenderer::LetterboxedAspect);
+        const bool forceOriginal = ext.sharedResources->forceOriginalAspectRatio.load() || letterboxed;
         const auto ratioMode = forceOriginal ? UserConfiguration::AspectRatio::Original : ext.sharedResources->userConfig.aspectRatio;
         switch (ratioMode) {
         case UserConfiguration::AspectRatio::Expand:

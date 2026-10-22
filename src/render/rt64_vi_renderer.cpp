@@ -86,6 +86,12 @@ namespace RT64 {
         p.commandList->drawInstanced(3, 1, 0, 0);
     }
 
+    bool VIRenderer::isLetterboxed(const VI &vi) {
+        const float activeWidth = float(vi.hRegion.hEnd) - float(vi.hRegion.hStart);
+        const float activeHeight = float(vi.vRegion.vEnd) - float(vi.vRegion.vStart);
+        return (activeWidth > 0.0f) && (activeHeight > 0.0f) && ((activeWidth / activeHeight) > LetterboxedAspect);
+    }
+
     void VIRenderer::getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor) {
         // We define three different coordinate spaces to work with to translate the VI parameters into the Window.
         //
@@ -132,6 +138,22 @@ namespace RT64 {
         hlslpp::float2 bottomRightScissor = fromSDtoHD({ float(viCropRect.x + viCropRect.z), float(viCropRect.y + viCropRect.w) }, sdSize, hdSize);
         topLeftScissor = fromHDtoWindow(topLeftScissor, hdSize, windowSize);
         bottomRightScissor = fromHDtoWindow(bottomRightScissor, hdSize, windowSize);
+
+        // A letterboxed picture (the VI shows fewer lines, e.g. Rogue Squadron's 640 x 334 cinematic flybys) is part
+        // of a 4:3 TV frame: scale it to the width a 4:3 frame would have in the window instead of filling the window
+        // with the cropped shot, so the black bars stay as on a TV.
+        if (removeBlackBorders && isLetterboxed(vi)) {
+            const float frameWidth = std::min(float(windowSize.x), float(windowSize.y) * (4.0f / 3.0f));
+            const float imageWidth = bottomRightScissor.x - topLeftScissor.x;
+            if ((imageWidth > 0.0f) && (frameWidth < imageWidth)) {
+                const float k = frameWidth / imageWidth;
+                const hlslpp::float2 center = windowSize / 2.0f;
+                topLeftViewport = center + (topLeftViewport - center) * k;
+                bottomRightViewport = center + (bottomRightViewport - center) * k;
+                topLeftScissor = center + (topLeftScissor - center) * k;
+                bottomRightScissor = center + (bottomRightScissor - center) * k;
+            }
+        }
 
         viewport = RenderViewport(topLeftViewport.x, topLeftViewport.y, bottomRightViewport.x - topLeftViewport.x, bottomRightViewport.y - topLeftViewport.y);
         scissor = RenderRect(lround(topLeftScissor.x), lround(topLeftScissor.y), lround(bottomRightScissor.x), lround(bottomRightScissor.y));

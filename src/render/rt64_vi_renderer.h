@@ -34,6 +34,9 @@ namespace RT64 {
         VIRenderer();
         ~VIRenderer();
         void render(const RenderParams &p);
+        // Display areas wider than this (active dots / half-lines; 4:3 is 640 x 480) are letterboxed shots.
+        static constexpr float LetterboxedAspect = 1.6f;
+        static bool isLetterboxed(const VI &vi);
         static void getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor);
     };
 };
