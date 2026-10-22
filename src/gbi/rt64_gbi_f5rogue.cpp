@@ -648,7 +648,7 @@ namespace RT64 {
                 const int16_t scale = dmemReadS16(DmemFogScale);
                 const int32_t product = mulFixed(ndc[2], multiplier);
                 const uint32_t fractionSum = (uint32_t(product) & 0xFFFF) + (uint32_t(offset) & 0xFFFF);
-                const int16_t integerSum = clamp16((product >> 16) + (offset >> 16) + (fractionSum >> 16));
+                const int16_t integerSum = clamp16(int64_t(product >> 16) + (offset >> 16) + int64_t(fractionSum >> 16));
                 const int64_t value = (int64_t(integerSum) << 16) | (fractionSum & 0xFFFF);
                 int16_t fogValue = clamp16((value * scale) >> 16);
                 fogValue = std::max<int16_t>(fogValue, 0);
