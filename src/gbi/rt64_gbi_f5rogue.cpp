@@ -104,6 +104,7 @@ namespace RT64 {
         // w * clip ratio) in bits 0-2 and 8-10.
         constexpr uint16_t ClipRejectMask = 0x7070;
         constexpr uint16_t ClipRequiredMask = 0x4343;
+        constexpr uint16_t ClipXFrustumMask = 0x1010;
 
         // TRI_GEN.
         constexpr uint32_t TriGenSize = 40;
@@ -862,7 +863,7 @@ namespace RT64 {
             return true;
         }
 
-        // Rogue Squadron's radar map triangles.
+        // Rogue Squadron's radar map triangles (geometry mode without the texture bit, which TEXTURE sets).
         constexpr uint32_t RadarOtherModeL = 0x00504240U;
         constexpr uint32_t RadarGeometryMode = 0x00801005U;
 
@@ -905,7 +906,7 @@ namespace RT64 {
             // The radar map: 8 untested-depth triangles with exactly these modes. In an outer band of the screen they
             // anchor to that edge so the map moves with the radar ring (texture rectangles, see drawTexRect). Other
             // geometry without depth test (sky, effects) isn't matched.
-            if ((origin == G_EX_ORIGIN_NONE) && !otherMode.zCmp() && (otherMode.L == RadarOtherModeL) && (geometryMode == RadarGeometryMode)) {
+            if ((origin == G_EX_ORIGIN_NONE) && !otherMode.zCmp() && (otherMode.L == RadarOtherModeL) && ((geometryMode & ~GeometryTexture) == RadarGeometryMode)) {
                 float minX = FLT_MAX, maxX = -FLT_MAX;
                 bool valid = true;
                 for (uint32_t i = 0; (i < vertexCount) && valid; i++) {
@@ -1033,8 +1034,11 @@ namespace RT64 {
             const Vertex &vc = context.vertices[c];
             const uint32_t geometryMode = dmemRead32(DmemGeometryMode);
 
-            // All three vertices are outside of the same frustum plane.
-            if ((va.clipFlags & vb.clipFlags & vc.clipFlags & ClipRejectMask) != 0) {
+            // All three vertices are outside of the same frustum plane. Widescreen: the microcode also rejects triangles
+            // entirely past the left or right plane, which are visible with the Expand aspect ratio, so only the y and z
+            // planes reject here. In 4:3 the scissor hides those triangles, so the picture doesn't change.
+            const uint16_t sharedFlags = va.clipFlags & vb.clipFlags & vc.clipFlags & ClipRejectMask;
+            if ((sharedFlags & ~ClipXFrustumMask) != 0) {
                 return;
             }
 
@@ -1091,7 +1095,7 @@ namespace RT64 {
             prepareVertex(state, c, smooth ? c : flatIndex, shade, texture, texcoordScale);
             syncDrawState(state);
             debugDumpTriangle(state, a, b, c, smooth ? UINT32_MAX : flatIndex, geometryMode,
-                ((va.clipFlags | vb.clipFlags | vc.clipFlags) & ClipRequiredMask) != 0);
+                (((va.clipFlags | vb.clipFlags | vc.clipFlags) & ClipRequiredMask) != 0) || (sharedFlags != 0));
             state->rsp->drawIndexedTri(a, b, c);
         }
 
