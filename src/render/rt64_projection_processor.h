@@ -10,6 +10,10 @@
 #include "rt64_buffer_uploader.h"
 
 namespace RT64 {
+    // Viewport origin (beyond the G_EX_ORIGIN_* values) for full-screen overlays drawn in 3D, e.g. Rogue Squadron's
+    // pause darkening and fades: never widened, drawn stretched across the wide target.
+    constexpr uint16_t ViewportOriginStretch = G_EX_ORIGIN_NONE + 1;
+
     // Whether a 3D viewport is widened with the Expand aspect ratio (its projection adjusted and drawn across the
     // wide target). The projection processor and the framebuffer renderer must agree, or the scene is stretched.
     // pixelToDisplay corrects for non-square framebuffer pixels (Rogue Squadron's 400x448 intro framebuffer is

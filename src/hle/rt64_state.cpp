@@ -364,6 +364,13 @@ namespace RT64 {
                     dstCallTile.syncRequired = checkResult.syncRequired;
 
                     if (gpuCopiesEnabled && checkResult.valid()) {
+                        // Bring-up: SWRS_TILECOPY_LOG reports tile copies used while drawing the 512-wide front end.
+                        static const bool swrsTileCopyLog = getenv("SWRS_TILECOPY_LOG") != nullptr;
+                        if (swrsTileCopyLog && (rdp->colorImage.width == 512)) {
+                            fprintf(stderr, "[wipe] dl %u tile copy tmem %u..%u id %llu size %ux%u\n", displayListCounter, checkTMEMStart, checkTMEMEnd,
+                                (unsigned long long)checkResult.tileId, checkResult.tileWidth, checkResult.tileHeight);
+                        }
+
                         dstCallTile.tileCopyUsed = true;
                         dstCallTile.tmemHashOrID = checkResult.tileId;
                         dstCallTile.tileCopyWidth = checkResult.tileWidth;
