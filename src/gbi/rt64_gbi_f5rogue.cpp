@@ -9,10 +9,13 @@
 
 #include <algorithm>
 #include <array>
+#include <cfloat>
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
 #include "hle/rt64_interpreter.h"
+#include "render/rt64_projection_processor.h"
 
 #include "rt64_gbi_rdp.h"
 
@@ -32,6 +35,10 @@
 //   doesn't update the combined matrix, so RT64 is given the previous combined matrix in that case.
 // - Vertex colors and texture coordinates are set per triangle, so RT64's vertex copy is changed (copied if it
 //   was already drawn) before each triangle when they differ.
+//
+// Widescreen handling specific to Rogue Squadron (not microcode behavior, see "Widescreen" below): HUD pieces are
+// anchored to the screen edges, full-screen overlays stretch, the menu wipe's sub-pixel gaps are closed and the
+// game's one-pixel-short scissors are kept at full size.
 
 namespace RT64 {
     namespace GBI_F5ROGUE {
@@ -129,6 +136,12 @@ namespace RT64 {
             uint32_t readOffset;
         };
 
+        // A HUD piece anchored to a screen edge (10.2 coordinates).
+        struct HudRegion {
+            int32_t ulx, uly, lrx, lry;
+            uint16_t origin;
+        };
+
         struct Context {
             std::array<uint8_t, DmemSize> dmem = {};
             std::array<Vertex, VertexCount> vertices = {};
@@ -142,8 +155,20 @@ namespace RT64 {
             DisplayList *blockEnd = nullptr;
             bool blockFetched = false;
             std::array<int16_t, 7> syncedViewport = {};
+            uint16_t syncedViewportAnchor = G_EX_ORIGIN_NONE;
             bool viewportSynced = false;
             std::array<GBIFunction, 0x40> rdpFunctions = {};
+
+            // Widescreen: the edge the viewport is anchored to for HUD triangles, the last vertex load (reloaded
+            // when the anchor changes, since RT64 binds the viewport at vertex load), how far each loaded vertex was
+            // moved on screen, the HUD pieces anchored in this and the previous task, and the last scissor.
+            uint16_t viewportAnchor = G_EX_ORIGIN_NONE;
+            uint32_t lastLoadAddress = 0;
+            uint32_t lastLoadCount = 0;
+            std::array<float, VertexCount> screenShiftX = {};
+            std::vector<HudRegion> hudRegions;
+            std::vector<HudRegion> hudRegionsPrevious;
+            std::array<int32_t, 4> previousScissor = { -1, -1, -1, -1 };
         };
 
         // RT64 only runs one state at a time, so the microcode state lives here like a DMEM would.
@@ -280,12 +305,20 @@ namespace RT64 {
             }
         }
 
+        // Widescreen helpers (below).
+        static uint16_t hudEdgeOrigin(int32_t left, int32_t right, int32_t fbWidth);
+        static void adjustScissor(State *state, uint32_t &w0, uint32_t &w1);
+
         static void sendRDP(State *state, uint32_t w0, uint32_t w1) {
             const uint32_t opCode = (w0 >> 24) & 0x3F;
             if (opCode == (G_RDPSETOTHERMODE & 0x3F)) {
                 // Keep the RSP's copy of the other mode in sync too.
                 state->rsp->setOtherMode(w0 & 0xFFFFFF, w1);
                 return;
+            }
+
+            if (opCode == (G_SETSCISSOR & 0x3F)) {
+                adjustScissor(state, w0, w1);
             }
 
             const GBIFunction function = context.rdpFunctions[opCode];
@@ -313,7 +346,101 @@ namespace RT64 {
             const int16_t dsdx = int16_t(w3 >> 16);
             const int16_t dtdy = int16_t(w3);
             const bool flip = ((w0 >> 24) & 0x3F) == (G_TEXRECTFLIP & 0x3F);
-            state->rdp->drawTexRect(ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, flip);
+
+            // Widescreen. Rectangles that lie entirely in the outer 30% of the screen (the lives counter, wingman icon,
+            // radar) are anchored to that edge, so the HUD placement setting can move them into the extended area.
+            // Everything else stays centered (messages, the title image). Billboards use TEXRECT_GEN and are unaffected.
+            // Anchors only matter when the HUD placement allows it; 4:3 screens ignore them.
+            const int32_t fbWidth = int32_t(state->rdp->colorImage.width) * 4;
+            ExtendedAlignment alignment = state->rdp->extended.global.rect;
+            int32_t ax0 = ulx, ax1 = lrx;
+
+            // Screen overlays: a rectangle covering the scissor's full height and reaching its left or right edge is a
+            // transition, not HUD (the wipe when a mission ends is one rectangle growing from the right edge). It
+            // stretches across the wide screen so it covers the extended area and finishes at the same time.
+            const FixedRect &scissor = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];
+            const bool screenOverlay = (uly <= scissor.uly) && (lry >= scissor.lry) && ((ulx <= scissor.ulx) || (lrx >= scissor.lrx)) &&
+                (alignment.leftOrigin == G_EX_ORIGIN_NONE) && (alignment.rightOrigin == G_EX_ORIGIN_NONE);
+            if (screenOverlay) {
+                // Edges within a pixel of the scissor edge snap to it: the wipe's last frame starts at x = 0.25, a sliver
+                // that stretching would make visible.
+                const int32_t ox0 = ((ulx > scissor.ulx) && (ulx - scissor.ulx <= 4)) ? scissor.ulx : ulx;
+                const int32_t ox1 = ((lrx < scissor.lrx) && (scissor.lrx - lrx <= 4)) ? scissor.lrx : lrx;
+                const uint8_t previousAspect = state->rdp->extended.global.rectAspect;
+                state->rdp->extended.global.rectAspect = G_EX_ASPECT_STRETCH;
+                state->rdp->drawTexRect(ox0, uly, ox1, lry, tile, uls, ult, dsdx, dtdy, flip, alignment);
+                state->rdp->extended.global.rectAspect = previousAspect;
+                return;
+            }
+
+            if ((alignment.leftOrigin == G_EX_ORIGIN_NONE) && (alignment.rightOrigin == G_EX_ORIGIN_NONE)) {
+                // Larger pieces (24 x 24 pixels or more: the lives icon, wingman icon, radar strips) in an outer band
+                // anchor to that edge. Smaller ones (digits, labels) follow a larger anchored piece they lie inside, from
+                // this or the previous task, with a margin of 8 pixels (the radar ring is four horizontal strips and a
+                // small marker straddles the line between two of them). Text stays centered.
+                const int32_t MinAnchorSize = 24 * 4;
+                const int32_t Margin = 8 * 4;
+                uint16_t origin = G_EX_ORIGIN_NONE;
+                if (((lrx - ulx) >= MinAnchorSize) && ((lry - uly) >= MinAnchorSize)) {
+                    origin = hudEdgeOrigin(ulx, lrx, fbWidth);
+                    if (origin != G_EX_ORIGIN_NONE) {
+                        context.hudRegions.push_back({ ulx, uly, lrx, lry, origin });
+                    }
+                }
+                else {
+                    for (const std::vector<HudRegion> *regions : { &context.hudRegions, &context.hudRegionsPrevious }) {
+                        for (const HudRegion &region : *regions) {
+                            if ((ulx >= region.ulx - Margin) && (lrx <= region.lrx + Margin) && (uly >= region.uly - Margin) && (lry <= region.lry + Margin)) {
+                                origin = region.origin;
+                                break;
+                            }
+                        }
+
+                        if (origin != G_EX_ORIGIN_NONE) {
+                            break;
+                        }
+                    }
+                }
+
+                if (origin != G_EX_ORIGIN_NONE) {
+                    alignment.leftOrigin = alignment.rightOrigin = origin;
+                    if (origin == G_EX_ORIGIN_RIGHT) {
+                        // Coordinates are relative to the origin: the right edge.
+                        ax0 -= fbWidth;
+                        ax1 -= fbWidth;
+                    }
+                }
+            }
+
+            state->rdp->drawTexRect(ax0, uly, ax1, lry, tile, uls, ult, dsdx, dtdy, flip, alignment);
+        }
+
+        // Widescreen: the game sets a full-frame scissor and then the same scissor one pixel smaller on the right and
+        // bottom (e.g. (0,0)-(400,448) then (0,0)-(399,447)), leaving the last column and row undrawn. A TV's overscan
+        // hides that, but with the Expand aspect ratio it shows as a dark strip at the window edge, so the previous,
+        // full size is kept. The 3D scissor's right edge is also always the framebuffer width minus one (the game sets
+        // 0x8010C506 to width - 1), including when in-mission cutscenes narrow its top and bottom; such a scissor
+        // extends to the edge too.
+        static void adjustScissor(State *state, uint32_t &w0, uint32_t &w1) {
+            const int32_t ulx = (w0 >> 12) & 0xFFF;
+            const int32_t uly = w0 & 0xFFF;
+            int32_t lrx = (w1 >> 12) & 0xFFF;
+            int32_t lry = w1 & 0xFFF;
+            std::array<int32_t, 4> &previous = context.previousScissor;
+            if ((ulx == previous[0]) && (uly == previous[1]) && (lrx == previous[2] - 4) && (lry == previous[3] - 4)) {
+                lrx = previous[2];
+                lry = previous[3];
+            }
+            else {
+                previous = { ulx, uly, lrx, lry };
+            }
+
+            const int32_t fbRight = int32_t(state->rdp->colorImage.width) * 4;
+            if ((fbRight > 4) && (lrx == fbRight - 4)) {
+                lrx = fbRight;
+            }
+
+            w1 = (w1 & 0xFF000000U) | (uint32_t(lrx & 0xFFF) << 12) | uint32_t(lry & 0xFFF);
         }
 
         // Vertices are given as their byte offset in the vertex buffer divided by 8 (vertex n is n * 5).
@@ -371,17 +498,25 @@ namespace RT64 {
                 dmemReadS16(DmemClipRatio)
             };
 
-            if (context.viewportSynced && (values == context.syncedViewport)) {
+            if (context.viewportSynced && (values == context.syncedViewport) && (context.viewportAnchor == context.syncedViewportAnchor)) {
                 return;
             }
 
+            // Widescreen: an anchored viewport keeps its contents at their distance from that edge. The translation is
+            // given relative to the anchor so the viewport itself doesn't move in 4:3.
+            uint16_t ori = rsp->extended.global.viewportOrigin;
+            int32_t offsetX = rsp->extended.global.viewportOffsetX;
+            if (context.viewportAnchor != G_EX_ORIGIN_NONE) {
+                ori = context.viewportAnchor;
+                offsetX = (ori == G_EX_ORIGIN_RIGHT) ? -int32_t(state->rdp->colorImage.width * 4) : 0;
+            }
+
             // Same conversion as RSP::setViewport. The scale keeps its sign: the projection given to RT64 has y negated instead.
-            const uint16_t ori = rsp->extended.global.viewportOrigin;
             interop::RSPViewport &viewport = rsp->viewportStack[rsp->viewportStackSize - 1];
             viewport.scale.x = float(values[0]) / 4.0f;
             viewport.scale.y = float(values[1]) / 4.0f;
             viewport.scale.z = float(values[2]) / DepthRange;
-            viewport.translate.x = float(state->rdp->movedFromOrigin(values[3], ori) + rsp->extended.global.viewportOffsetX) / 4.0f;
+            viewport.translate.x = float(state->rdp->movedFromOrigin(values[3], ori) + offsetX) / 4.0f;
             viewport.translate.y = float(values[4] + rsp->extended.global.viewportOffsetY) / 4.0f;
             viewport.translate.z = float(values[5]) / DepthRange;
             rsp->extended.viewportOriginStack[rsp->viewportStackSize - 1] = ori;
@@ -393,6 +528,7 @@ namespace RT64 {
             }
 
             context.syncedViewport = values;
+            context.syncedViewportAnchor = context.viewportAnchor;
             context.viewportSynced = true;
         }
 
@@ -503,9 +639,181 @@ namespace RT64 {
                 dst.color.b = uint8_t(v.rgba >> 8);
                 dst.color.a = uint8_t(v.rgba);
                 context.loaded[i] = { v.rgba, v.s / 32.0f, v.t / 32.0f };
+                context.screenShiftX[i] = 0.0f;
             }
 
             state->rsp->setVertexF5Rogue(rdramAddress, rspVertices.data(), count, 0);
+            context.lastLoadAddress = rdramAddress;
+            context.lastLoadCount = count;
+        }
+
+        // Widescreen.
+
+        // Elements entirely within the outer 30% of the screen are anchored to that edge; returns G_EX_ORIGIN_NONE
+        // otherwise. Coordinates in 10.2 like the RDP's.
+        static uint16_t hudEdgeOrigin(int32_t left, int32_t right, int32_t fbWidth) {
+            if (fbWidth <= 0) {
+                return G_EX_ORIGIN_NONE;
+            }
+
+            const int32_t outerBand = (fbWidth * 3) / 10;
+            if (right <= outerBand) {
+                return G_EX_ORIGIN_LEFT;
+            }
+            else if (left >= (fbWidth - outerBand)) {
+                return G_EX_ORIGIN_RIGHT;
+            }
+            else {
+                return G_EX_ORIGIN_NONE;
+            }
+        }
+
+        // Anchors the viewport for the following triangles. RT64 binds the viewport when vertices load, so the last
+        // vertex batch is loaded again.
+        static void setViewportAnchor(State *state, uint16_t origin) {
+            if (origin == context.viewportAnchor) {
+                return;
+            }
+
+            context.viewportAnchor = origin;
+            syncViewport(state);
+            if (context.lastLoadCount > 0) {
+                loadVertices(state, context.lastLoadAddress, context.lastLoadCount);
+            }
+        }
+
+        // Screen x of a vertex in pixels as the GPU computes it (before any widescreen move).
+        static bool vertexScreenX(uint32_t index, float &x) {
+            const Vertex &v = context.vertices[index];
+            if (v.clip[3] <= 0) {
+                return false;
+            }
+
+            const float ndcX = float(v.clip[0]) / float(v.clip[3]);
+            x = ndcX * float(dmemReadS16(DmemViewportScale + 0)) / 4.0f + float(dmemReadS16(DmemViewportTranslate + 0)) / 4.0f;
+            return true;
+        }
+
+        static bool vertexScreenY(uint32_t index, float &y) {
+            const Vertex &v = context.vertices[index];
+            if (v.clip[3] <= 0) {
+                return false;
+            }
+
+            const float ndcY = float(v.clip[1]) / float(v.clip[3]);
+            y = ndcY * float(dmemReadS16(DmemViewportScale + 2)) / 4.0f + float(dmemReadS16(DmemViewportTranslate + 2)) / 4.0f;
+            return true;
+        }
+
+        // Rogue Squadron's radar map triangles.
+        constexpr uint32_t RadarOtherModeL = 0x00504240U;
+        constexpr uint32_t RadarGeometryMode = 0x00801005U;
+
+        // Front-end menu wipe mesh.
+        constexpr uint32_t WipeOtherModeL = 0x00504240U;
+        constexpr uint32_t WipeFramebufferWidth = 512;
+
+        // Picks the viewport anchor for a TRI1/TRI2 command's vertices and closes the menu wipe's gaps.
+        static void widescreenTriangles(State *state, const uint32_t *vertices, uint32_t vertexCount, bool hasTexcoords) {
+            const interop::OtherMode &otherMode = state->rdp->otherMode;
+            const uint32_t geometryMode = dmemRead32(DmemGeometryMode);
+            uint16_t origin = G_EX_ORIGIN_NONE;
+
+            // Full-screen overlays (pause darkening, fades): untextured geometry without depth test that covers the
+            // full height and reaches a left or right edge stretches across the wide screen.
+            if (!otherMode.zCmp() && !hasTexcoords) {
+                float minX = FLT_MAX, maxX = -FLT_MAX, minY = FLT_MAX, maxY = -FLT_MAX;
+                bool valid = true;
+                for (uint32_t i = 0; (i < vertexCount) && valid; i++) {
+                    float x, y;
+                    valid = vertexScreenX(vertices[i], x) && vertexScreenY(vertices[i], y);
+                    minX = std::min(minX, x);
+                    maxX = std::max(maxX, x);
+                    minY = std::min(minY, y);
+                    maxY = std::max(maxY, y);
+                }
+
+                // Screen extent from the current viewport (pixels).
+                const float scaleX = std::abs(float(dmemReadS16(DmemViewportScale + 0))) / 4.0f;
+                const float scaleY = std::abs(float(dmemReadS16(DmemViewportScale + 2))) / 4.0f;
+                const float translateX = float(dmemReadS16(DmemViewportTranslate + 0)) / 4.0f;
+                const float translateY = float(dmemReadS16(DmemViewportTranslate + 2)) / 4.0f;
+                const float left = translateX - scaleX, right = translateX + scaleX;
+                const float top = translateY - scaleY, bottom = translateY + scaleY;
+                if (valid && (right > left) && (minY <= top + 1.0f) && (maxY >= bottom - 2.0f) && ((minX <= left + 1.0f) || (maxX >= right - 1.0f))) {
+                    origin = ViewportOriginStretch;
+                }
+            }
+
+            // The radar map: 8 untested-depth triangles with exactly these modes. In an outer band of the screen they
+            // anchor to that edge so the map moves with the radar ring (texture rectangles, see drawTexRect). Other
+            // geometry without depth test (sky, effects) isn't matched.
+            if ((origin == G_EX_ORIGIN_NONE) && !otherMode.zCmp() && (otherMode.L == RadarOtherModeL) && (geometryMode == RadarGeometryMode)) {
+                float minX = FLT_MAX, maxX = -FLT_MAX;
+                bool valid = true;
+                for (uint32_t i = 0; (i < vertexCount) && valid; i++) {
+                    float x;
+                    valid = vertexScreenX(vertices[i], x);
+                    minX = std::min(minX, x);
+                    maxX = std::max(maxX, x);
+                }
+
+                if (valid) {
+                    origin = hudEdgeOrigin(int32_t(minX * 4.0f), int32_t(maxX * 4.0f), int32_t(state->rdp->colorImage.width) * 4);
+                }
+            }
+
+            setViewportAnchor(state, origin);
+
+            // Front-end wipes (title <-> menus) draw both pictures as 64-pixel texture rectangles on the exact 64-pixel
+            // grid and only the soft band as this mesh, whose tiles are 63.91 pixels wide. In a right-to-left wipe the
+            // mesh's opaque right end stops up to 0.66 pixels short of the next rectangle (e.g. 447.43 against 448),
+            // and the picture underneath shows through that sliver. The N64 fills a pixel when a span covers its left
+            // edge, so it never shows; at higher resolutions it is a column of several pixels. Opaque right edges move
+            // onto the grid. The mesh's tile columns also meet the screen edges a fraction of a pixel inside, so
+            // corners within one pixel of a screen edge snap onto it. Only this exact mode is affected.
+            if (hasTexcoords && (otherMode.textPersp() != G_TP_PERSP) && !otherMode.zCmp() && (otherMode.L == WipeOtherModeL) &&
+                (state->rdp->colorImage.width == WipeFramebufferWidth))
+            {
+                float cornerX[4] = {};
+                float maxX = -FLT_MAX;
+                for (uint32_t i = 0; i < vertexCount; i++) {
+                    if (!vertexScreenX(vertices[i], cornerX[i])) {
+                        return;
+                    }
+
+                    cornerX[i] += context.screenShiftX[vertices[i]];
+                    maxX = std::max(maxX, cornerX[i]);
+                }
+
+                auto shift = [state](uint32_t index, float dx) {
+                    state->rsp->shiftVertexScreenX(uint16_t(index), dx);
+                    context.screenShiftX[index] += dx;
+                };
+
+                const float GridSize = 64.0f;
+                const float target = std::ceil(maxX / GridSize) * GridSize;
+                const float dx = target - maxX;
+                if ((dx > 0.001f) && (dx < 1.0f)) {
+                    for (uint32_t i = 0; i < vertexCount; i++) {
+                        const bool opaque = (context.vertices[vertices[i]].rgba & 0xFF) == 0xFF;
+                        if (opaque && (std::abs(cornerX[i] - maxX) < 0.01f)) {
+                            shift(vertices[i], dx);
+                            cornerX[i] += dx;
+                        }
+                    }
+                }
+
+                const float screenRight = float(state->rdp->colorImage.width);
+                for (uint32_t i = 0; i < vertexCount; i++) {
+                    if ((cornerX[i] > 0.0f) && (cornerX[i] < 1.0f)) {
+                        shift(vertices[i], -cornerX[i]);
+                    }
+                    else if ((cornerX[i] > screenRight - 1.0f) && (cornerX[i] < screenRight)) {
+                        shift(vertices[i], screenRight - cornerX[i]);
+                    }
+                }
+            }
         }
 
         // Triangles.
@@ -682,6 +990,9 @@ namespace RT64 {
                     vd.t = texcoords[7];
                 }
             }
+
+            const uint32_t commandVertices[4] = { a, b, c, d };
+            widescreenTriangles(state, commandVertices, fourVertices ? 4 : 3, hasTexcoords);
 
             drawTriangle(state, a, b, c, a);
 
@@ -1151,6 +1462,9 @@ namespace RT64 {
 
             *dl = *dl + (TriGenSize / sizeof(DisplayList)) - 1;
 
+            // Widescreen: terrain is never anchored.
+            setViewportAnchor(state, G_EX_ORIGIN_NONE);
+
             if (cmd.byte(2) & 0x2) {
                 triGenQuad(state, cmd);
             }
@@ -1317,6 +1631,14 @@ namespace RT64 {
             dmaRead(state, DmemColorTable, (*dl)->w1, (*dl)->w0 & 0xFFFF);
         }
 
+        // Widescreen: a viewport from the game replaces the HUD anchor (it is set again by the next HUD triangle).
+        static void dropViewportAnchorOnWrite(uint32_t address, uint32_t length) {
+            address &= DmemMask;
+            if ((address < (DmemViewportTranslate + 8)) && ((address + length) > DmemViewportScale)) {
+                context.viewportAnchor = G_EX_ORIGIN_NONE;
+            }
+        }
+
         static void moveMem(State *state, DisplayList **dl) {
             // The next 16 bytes go to the address in the table (0x80 is the viewport, 0x82 the texture coordinate scale).
             const uint32_t address = dmemRead16(DmemMoveMemTable + (*dl)->p0(16, 8));
@@ -1324,10 +1646,12 @@ namespace RT64 {
             *dl = *dl + 2;
 
             // SQV only stores the bytes up to the end of the 16-byte line.
-            for (uint32_t i = 0; i < (16 - (address & 0xF)); i++) {
+            const uint32_t length = 16 - (address & 0xF);
+            for (uint32_t i = 0; i < length; i++) {
                 dmemWrite8(address + i, uint8_t(words[i / 4] >> (24 - (i % 4) * 8)));
             }
 
+            dropViewportAnchorOnWrite(address, length);
             syncViewport(state);
         }
 
@@ -1335,6 +1659,7 @@ namespace RT64 {
             const uint32_t w0 = (*dl)->w0;
             const uint32_t address = dmemRead16(DmemMoveWordTable + (w0 & 0xFF)) + ((w0 >> 8) & 0xFFFF);
             dmemWrite32(address, (*dl)->w1);
+            dropViewportAnchorOnWrite(address, 4);
             syncViewport(state);
         }
 
@@ -1495,6 +1820,10 @@ namespace RT64 {
             context.blockEnd = nullptr;
             context.blockFetched = false;
             context.viewportSynced = false;
+            context.viewportAnchor = G_EX_ORIGIN_NONE;
+            context.lastLoadCount = 0;
+            context.hudRegionsPrevious.swap(context.hudRegions);
+            context.hudRegions.clear();
 
             // Full-width texture rectangles in this game are 2D art (title screen, menu photos): keep them 4:3 and
             // centered with the Expand aspect ratio instead of stretching them. Framebuffer copies and fill rectangle

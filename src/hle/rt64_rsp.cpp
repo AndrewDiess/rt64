@@ -892,6 +892,32 @@ namespace RT64 {
         drawData.lookAtIndices[globalIndex] = 0;
     }
     
+    // Moves a loaded vertex horizontally by dx screen pixels (copying it first if a triangle already used it). The GPU
+    // transforms the object space position, so the offset is converted back through the current matrix
+    // (x' = x * m[0][0] + ...) and the vertex's w.
+    void RSP::shiftVertexScreenX(uint16_t dstIndex, float dx) {
+        if (dstIndex >= RSP_MAX_VERTICES) {
+            assert(false && "Vertex index is not valid. DL is possibly corrupted.");
+            return;
+        }
+
+        const uint32_t globalIndex = unusedVertexGlobalIndex(dstIndex);
+        const int workloadCursor = state->ext.workloadQueue->writeCursor;
+        Workload &workload = state->ext.workloadQueue->workloads[workloadCursor];
+        const interop::RSPViewport &viewport = viewportStack[viewportStackSize - 1];
+        const float m00 = float(modelViewProjMatrix[0][0]);
+        const float scaleX = float(viewport.scale.x);
+        const float w = float(workload.drawData.posTransformed[globalIndex][3]);
+        if ((std::abs(m00) < 1e-8f) || (std::abs(scaleX) < 1e-8f)) {
+            return;
+        }
+
+        const float dxObject = (dx * w) / (scaleX * m00);
+        workload.drawData.posFloats[globalIndex * 3 + 0] += dxObject;
+        workload.drawData.posTransformed[globalIndex][0] = float(workload.drawData.posTransformed[globalIndex][0]) + dxObject * m00;
+        workload.drawData.posScreen[globalIndex][0] = float(workload.drawData.posScreen[globalIndex][0]) + dx;
+    }
+
     void RSP::branchZ(uint32_t branchDl, uint16_t vtxIndex, uint32_t zValue, DisplayList **dl) {
         const bool forceBranch = state->ext.enhancementConfig->f3dex.forceBranch || extended.forceBranch;
         const int workloadCursor = state->ext.workloadQueue->writeCursor;

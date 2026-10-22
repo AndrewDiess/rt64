@@ -264,6 +264,7 @@ namespace RT64 {
         uint32_t unusedVertexGlobalIndex(uint16_t dstIndex);
         void modifyVertex(uint16_t dstIndex, uint16_t dstAttribute, uint32_t value);
         void setVertexColorTexcoord(uint16_t dstIndex, uint32_t color, float s, float t);
+        void shiftVertexScreenX(uint16_t dstIndex, float dx);
         void setGeometryMode(uint32_t mask);
         void pushGeometryMode();
         void popGeometryMode();
