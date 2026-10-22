@@ -11,6 +11,7 @@
 #include <array>
 #include <cfloat>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
 #include <vector>
 
@@ -39,6 +40,9 @@
 // Widescreen handling specific to Rogue Squadron (not microcode behavior, see "Widescreen" below): HUD pieces are
 // anchored to the screen edges, full-screen overlays stretch, the menu wipe's sub-pixel gaps are closed and the
 // game's one-pixel-short scissors are kept at full size.
+
+// Debug aid (see debugDump below), set by the host.
+uint32_t f5rogueDebugDumpTask = 0;
 
 namespace RT64 {
     namespace GBI_F5ROGUE {
@@ -305,6 +309,46 @@ namespace RT64 {
             }
         }
 
+        // Debug aid for comparing with the reference renderer (tools5ref in the Rogue Squadron project): while
+        // f5rogueDebugDumpTask is nonzero (set by the host for a saved task), every triangle and texture rectangle
+        // drawn is written to C:/projects/swrs-gfxsnap/task_<n>.hle.tsv in the format of tools5rdp.py: per vertex
+        // x y (pixels) z (RDP z) r g b a s t w, sorted by y, plus a "clipped" column for triangles the microcode
+        // would clip (it then draws several smaller triangles).
+        static FILE *debugDumpFile = nullptr;
+        static uint32_t debugDumpOpenTask = 0;
+        static uint32_t debugDumpIndex = 0;
+
+        static FILE *debugDump() {
+            if (f5rogueDebugDumpTask != debugDumpOpenTask) {
+                if (debugDumpFile != nullptr) {
+                    fclose(debugDumpFile);
+                    debugDumpFile = nullptr;
+                }
+
+                debugDumpOpenTask = f5rogueDebugDumpTask;
+                debugDumpIndex = 0;
+                if (debugDumpOpenTask != 0) {
+                    char path[128];
+                    snprintf(path, sizeof(path), "C:/projects/swrs-gfxsnap/task_%u.hle.tsv", debugDumpOpenTask);
+                    debugDumpFile = fopen(path, "w");
+                }
+            }
+
+            return debugDumpFile;
+        }
+
+        static void debugDumpRect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint8_t tile, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip) {
+            FILE *f = debugDump();
+            if (f == nullptr) {
+                return;
+            }
+
+            fprintf(f, "rect\t%u\t%02X\t%u\t%g %g %g %g %d %d %d %d\n", debugDumpIndex++, flip ? 0xE5 : 0xE4, tile,
+                ulx / 4.0, uly / 4.0, lrx / 4.0, lry / 4.0, uls, ult, dsdx, dtdy);
+        }
+
+        static void debugDumpTriangle(State *state, uint32_t a, uint32_t b, uint32_t c, uint32_t flatIndex, uint32_t geometryMode, bool clipped);
+
         // Widescreen helpers (below).
         static uint16_t hudEdgeOrigin(int32_t left, int32_t right, int32_t fbWidth);
         static void adjustScissor(State *state, uint32_t &w0, uint32_t &w1);
@@ -335,7 +379,9 @@ namespace RT64 {
         }
 
         // RDP texture rectangle in its native 128-bit format.
-        static void drawTexRect(State *state, uint32_t w0, uint32_t w1, uint32_t w2, uint32_t w3) {
+        // widescreenRules: HUD anchoring and overlay stretching apply (RDP texture rectangles from the display list,
+        // not TEXRECT_GEN billboards).
+        static void drawTexRect(State *state, uint32_t w0, uint32_t w1, uint32_t w2, uint32_t w3, bool widescreenRules) {
             const int32_t ulx = (w1 >> 12) & 0xFFF;
             const int32_t uly = w1 & 0xFFF;
             const int32_t lrx = (w0 >> 12) & 0xFFF;
@@ -346,6 +392,11 @@ namespace RT64 {
             const int16_t dsdx = int16_t(w3 >> 16);
             const int16_t dtdy = int16_t(w3);
             const bool flip = ((w0 >> 24) & 0x3F) == (G_TEXRECTFLIP & 0x3F);
+            debugDumpRect(ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, flip);
+            if (!widescreenRules) {
+                state->rdp->drawTexRect(ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, flip);
+                return;
+            }
 
             // Widescreen. Rectangles that lie entirely in the outer 30% of the screen (the lives counter, wingman icon,
             // radar) are anchored to that edge, so the HUD placement setting can move them into the extended area.
@@ -845,6 +896,30 @@ namespace RT64 {
             }
         }
 
+        static void debugDumpTriangle(State *state, uint32_t a, uint32_t b, uint32_t c, uint32_t flatIndex, uint32_t geometryMode, bool clipped) {
+            FILE *f = debugDump();
+            if (f == nullptr) {
+                return;
+            }
+
+            uint32_t order[3] = { a, b, c };
+            std::stable_sort(std::begin(order), std::end(order), [](uint32_t p, uint32_t q) {
+                return context.vertices[p].screen[1] < context.vertices[q].screen[1];
+            });
+
+            fprintf(f, "tri\t%u\t%02X\t%u", debugDumpIndex++, 0xC8 | (geometryMode & 0x7), (dmemRead32(DmemTexture) >> 8) & 0x7);
+            for (uint32_t index : order) {
+                const Vertex &v = context.vertices[index];
+                const uint32_t rgba = context.vertices[(flatIndex == UINT32_MAX) ? index : flatIndex].rgba;
+                const double z = (double(v.screen[2]) + v.screenZFraction / 65536.0) * 32.0;
+                fprintf(f, "\t%.3f %.3f %.3f %u %u %u %u %d %d 0", v.screen[0] / 4.0, v.screen[1] / 4.0, z,
+                    rgba >> 24, (rgba >> 16) & 0xFF, (rgba >> 8) & 0xFF, rgba & 0xFF, v.s, v.t);
+            }
+
+            fprintf(f, "\t%s\n", clipped ? "clipped" : "");
+            (void)state;
+        }
+
         // The triangle setup of the microcode. flatIndex is the vertex whose color is used without smooth shading.
         static void drawTriangle(State *state, uint32_t a, uint32_t b, uint32_t c, uint32_t flatIndex) {
             const Vertex &va = context.vertices[a];
@@ -909,6 +984,8 @@ namespace RT64 {
             prepareVertex(state, b, smooth ? b : flatIndex, shade, texture, texcoordScale);
             prepareVertex(state, c, smooth ? c : flatIndex, shade, texture, texcoordScale);
             syncDrawState(state);
+            debugDumpTriangle(state, a, b, c, smooth ? UINT32_MAX : flatIndex, geometryMode,
+                ((va.clipFlags | vb.clipFlags | vc.clipFlags) & ClipRequiredMask) != 0);
             state->rsp->drawIndexedTri(a, b, c);
         }
 
@@ -1583,7 +1660,7 @@ namespace RT64 {
             const uint32_t rectW1 = (tile << 24) | (((uint32_t(uint16_t(ul[0])) << 12) | uint16_t(ul[1])) & 0xFFFFFF);
             const uint32_t rectW2 = (uint32_t(start[0] - 0x10) << 16) | (uint32_t(start[1] - 0x10) & 0xFFFF);
             const uint32_t rectW3 = (uint32_t(step[0]) << 16) | (uint32_t(step[1]) & 0xFFFF);
-            drawTexRect(state, rectW0, rectW1, rectW2, rectW3);
+            drawTexRect(state, rectW0, rectW1, rectW2, rectW3, false);
         }
 
         // Other commands.
@@ -1798,7 +1875,7 @@ namespace RT64 {
         static void rdpCommand(State *state, DisplayList **dl) {
             const uint32_t w0 = (*dl)->w0;
             if ((w0 >> 25) == (G_TEXRECT >> 1)) {
-                drawTexRect(state, w0, (*dl)->w1, (*dl)[1].w0, (*dl)[1].w1);
+                drawTexRect(state, w0, (*dl)->w1, (*dl)[1].w0, (*dl)[1].w1, true);
                 *dl = *dl + 1;
             }
             else {
